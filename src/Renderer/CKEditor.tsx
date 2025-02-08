@@ -61,7 +61,7 @@ export async function CreateCkeditor(element: HTMLElement): Promise<ClassicEdito
 		],
 		language: {
 			ui: "en",
-			content: "ar",
+			// content: "fa",
 		},
 		toolbar: [
 			"undo",

@@ -150,13 +150,26 @@
 		}
 	}
 
-	pre, code {
+	pre,
+	code {
 		color: white;
 		font-family: $Font-Mono;
 	}
 
 	a {
 		color: #4f8cc9;
+	}
+
+	ul,
+	ol {
+		display: block;
+		list-style-type: disc;
+		margin-block-start: 1em;
+		margin-block-end: 1em;
+		margin-inline-start: 0;
+		margin-inline-end: 0;
+		padding-inline-start: 40px;
+		unicode-bidi: isolate;
 	}
 }
 

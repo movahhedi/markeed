@@ -1,3 +1,4 @@
+import { sha256 } from "hash-wasm";
 import { createRef } from "lestin";
 import * as Monaco from "monaco-editor";
 import { ShowSuccessToast } from "toastification";
@@ -11,8 +12,13 @@ import x from "./styles/index.module.scss";
 
 import "toastification/Toast.css";
 // import "vazirmatn/Vazirmatn-font-face.css";
+// import Store from "electron-store";
+
+localStorage.setItem("theme", "dark");
 
 import("@fortawesome/fontawesome-free/css/all.min.css");
+
+let currentContentHash = "";
 
 let currentFile: IFile;
 
@@ -23,6 +29,13 @@ const enum EditorType {
 	Ck,
 	Preview,
 }
+
+const showEditor = {
+	monaco: true,
+	rtl: true,
+	ck: false,
+	preview: true,
+};
 
 //#region Toggle buttons
 let showMonacoEditor = true,
@@ -59,11 +72,12 @@ function HideRtlEditor() {
 
 function ShowCkEditor() {
 	const content = GetMonacoEditorContent();
-	SetCkEditorContent(content);
 
 	showCkEditor = true;
 	ckeditorBoxRef.current!.style.display = "block";
 	toggleCkEditorButtonRef.current!.classList.add(x.active);
+
+	SetCkEditorContent(content);
 }
 
 function HideCkEditor() {
@@ -142,7 +156,18 @@ function GetRtlEditorContent() {
 }
 
 function GetCkEditorContent() {
-	return ckeditor.getData();
+	let content = ckeditor.getData();
+
+	// replace `> \[!NOTE\]` and `> \[!TIP\]` with `> [!NOTE]` and `> [!TIP]` (remove the backslashes)
+	content = content.replaceAll(/> \\\[!([A-Z]+)\\\]/g, "> [!$1]");
+	content = content.replaceAll(/\\\[/g, "[").replaceAll(/\\\]/g, "]");
+
+	// Add and empty line at the end of the content if it doesn't have one
+	if (!content.endsWith("\n")) {
+		content += "\n";
+	}
+
+	return content;
 }
 
 let onAfterInputTimeout: NodeJS.Timeout | number | undefined;
@@ -167,14 +192,26 @@ function OnRtlEditorChange() {
 }
 
 function OnCkEditorChange() {
-	console.log(123);
+	// CKEditor randomly fires this event, so we need to debounce it by getting the content's hash and comparing it.
+
+	let isRunning = false;
 
 	if (onAfterInputTimeout) {
 		clearTimeout(onAfterInputTimeout);
 	}
-	onAfterInputTimeout = setTimeout(() => {
+	onAfterInputTimeout = setTimeout(async () => {
+		if (isRunning) return;
+		isRunning = true;
 		const content = GetCkEditorContent();
-		SyncEditors(EditorType.Ck, content);
+
+		const newHash = await sha256(content);
+
+		if (newHash !== currentContentHash) {
+			await SyncEditors(EditorType.Ck, content);
+			currentContentHash = newHash;
+		}
+
+		isRunning = false;
 	}, syncDelay);
 }
 //#endregion
@@ -384,7 +421,8 @@ const bodyContent = (
 document.body.appendChild(bodyContent);
 
 const monacoEditor = Monaco.editor.create(monacoBoxRef.current!, {
-	value: "# Hello, World!",
+	value: "# Hello, World!\n",
+	// value: "",
 	language: "markdown",
 	theme: "vs-dark",
 	automaticLayout: true,
@@ -401,8 +439,130 @@ monacoEditor.addCommand(Monaco.KeyMod.CtrlCmd | Monaco.KeyCode.KeyS, () => {
 
 monacoEditor.onDidChangeModelContent(OnMonacoEditorChange);
 
+let scrollingEditor: EditorType | undefined = undefined;
+
+// on Monaco editor scroll, scroll in the other editors (based on line numbers (percent))
+monacoEditor.onDidScrollChange((e) => {
+	if (scrollingEditor) {
+		return;
+	}
+
+	scrollingEditor = EditorType.Monaco;
+
+	// get line count
+	const lineCount = monacoEditor.getModel()!.getLineCount();
+
+	// calculate the percentage of the scroll
+	// get first line number in the viewport
+	const firstLine = monacoEditor.getVisibleRanges()[0].startLineNumber;
+	let percent = firstLine / lineCount;
+
+	if (percent < 0.02) {
+		percent = 0;
+	}
+
+	// scroll in the RTL editor
+	rtlEditorRef.current!.scrollTop = percent * rtlEditorRef.current!.scrollHeight;
+
+	// scroll in the preview (iframe)
+	previewContentRef.current!.contentWindow!.postMessage(
+		JSON.stringify({
+			type: "scroll",
+			scrollPercent: percent,
+		}),
+		"*",
+	);
+
+	console.log(
+		"scroll",
+		e.scrollTop,
+		rtlEditorRef.current!.scrollHeight,
+		percent,
+		rtlEditorRef.current!.scrollTop,
+	);
+
+	scrollingEditor = undefined;
+});
+
+// On RTL editor scroll, scroll in the other editors (based on line numbers (percent))
+rtlEditorRef.current!.addEventListener("scroll", (e) => {
+	if (scrollingEditor) {
+		return;
+	}
+
+	scrollingEditor = EditorType.Rtl;
+
+	// get scroll percentage
+	let percent = rtlEditorRef.current!.scrollTop / rtlEditorRef.current!.scrollHeight;
+
+	if (percent < 0.02) {
+		percent = 0;
+	}
+
+	// get line count
+	const lineCount = monacoEditor.getModel()!.getLineCount();
+
+	// get the line number based on the percentage
+	const lineNumber = Math.floor(lineCount * percent);
+
+	// scroll in the monaco editor
+	monacoEditor.setScrollTop(monacoEditor.getTopForLineNumber(lineNumber));
+
+	scrollingEditor = undefined;
+});
+
+// On Preview scroll, scroll in the other editors (based on line numbers (percent))
+previewContentRef.current!.addEventListener("scroll", (e) => {
+	if (scrollingEditor) {
+		return;
+	}
+
+	scrollingEditor = EditorType.Preview;
+
+	// get scroll percentage
+	const percent =
+		previewContentRef.current!.scrollTop /
+		(previewContentRef.current!.scrollHeight -
+			previewContentRef.current!.clientHeight);
+
+	// get line count
+	const lineCount = monacoEditor.getModel()!.getLineCount();
+
+	// get the line number based on the percentage
+	const lineNumber = Math.floor(lineCount * percent);
+
+	// scroll in the monaco editor
+	monacoEditor.setScrollTop(monacoEditor.getTopForLineNumber(lineNumber));
+
+	scrollingEditor = undefined;
+});
+
+window.addEventListener("message", (event) => {
+	const data = JSON.parse(event.data);
+
+	if (data.type === "scroll") {
+		if (scrollingEditor) {
+			return;
+		}
+
+		scrollingEditor = EditorType.Preview;
+
+		const lineCount = monacoEditor.getModel()!.getLineCount();
+		const lineNumber = Math.floor(lineCount * data.scrollPercent);
+
+		monacoEditor.setScrollTop(monacoEditor.getTopForLineNumber(lineNumber));
+
+		scrollingEditor = undefined;
+	}
+});
+
 monacoEditor.focus();
 monacoEditor.layout();
+
+// set Monaco to wrap text
+monacoEditor.updateOptions({
+	wordWrap: "on",
+});
 
 function SetTitle(title: string) {
 	document.title = title + " - Markeed";
@@ -419,7 +579,7 @@ window.addEventListener("keypress", (e) => {
 //@ts-expect-error
 const ckeditor = await CreateCkeditor(ckeditorRef.current!);
 // ckeditor.on("change", OnCkEditorChange);
-// ckeditor.model.document.on("change:data", OnCkEditorChange);
+ckeditor.model.document.on("change:data", OnCkEditorChange);
 // ckeditor.model.document.on("change", OnCkEditorChange);
 // ckeditor.model.document.on("key", OnCkEditorChange);
 // ckeditor.on("key", OnCkEditorChange);
